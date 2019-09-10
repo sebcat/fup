@@ -2,12 +2,15 @@ package main
 
 import (
 	"io"
-	"io/ioutil"
 	"log"
+	"mime"
 	"net/http"
+	"os"
+	"regexp"
 )
 
-var uploadPage = `
+const uploadDir = "uploads"
+const uploadPage = `
 <html>
 <head>
 <title>Upload files</title>
@@ -21,7 +24,10 @@ var uploadPage = `
 </html>
 `
 
+var replaceChars = regexp.MustCompile("[^a-zA-Z0-9._-]")
+
 func getUploadPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write([]byte(uploadPage))
 }
 
@@ -31,6 +37,7 @@ func postUploads(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
+
 	for {
 		p, err := mr.NextPart()
 		if err == io.EOF {
@@ -38,27 +45,48 @@ func postUploads(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("NextPart error: %v\n", err)
+			return
 		}
 
-		datas, err := ioutil.ReadAll(p)
+		_, params, err := mime.ParseMediaType(p.Header.Get("Content-Disposition"))
+		filename, ok := params["filename"]
+		if !ok {
+			log.Println("missing filename in multipart")
+			return
+		}
+
+		filename = replaceChars.ReplaceAllString(filename, "-")
+		filename = uploadDir + "/" + filename
+
+		f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("open: %v\n", err)
+			return
 		}
 
-		// TODO: save to file
-
-		// Content-Disposition: [form-data; name="f"; filename="svg.svg"]
-		for k, v := range p.Header {
-			log.Printf("%v: %v", k, v)
+		nwritten, err := io.Copy(f, p)
+		if err != nil {
+			log.Printf("%v: %v\n", filename, err)
+			f.Close()
+			return
+		} else {
+			log.Printf("Uploaded %v: %v bytes\n", filename, nwritten)
 		}
 
-		log.Printf("Part %q\n", datas)
+		f.Close()
 	}
+
+	w.Header().Set("Cache-Control", "no-cache")
+	io.WriteString(w, "ok\n")
 }
 
 func main() {
-	listenAt := "localhost:8080"
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		log.Fatal(err)
+	}
+
+	listenAt := ":8080"
 	http.HandleFunc("/", getUploadPage)
 	http.HandleFunc("/fup", postUploads)
 	log.Printf("Start listening at %v\n", listenAt)
